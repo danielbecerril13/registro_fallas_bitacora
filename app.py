@@ -357,8 +357,7 @@ def grafica():
     img.seek(0)
     return send_file(img, mimetype="image/png")
 
-@app.route("/exportar")
-def exportar():
+
     fallas = Falla.query.all()
     if not fallas:
         return "No hay datos para exportar"

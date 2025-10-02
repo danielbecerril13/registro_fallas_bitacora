@@ -1,8 +1,7 @@
-flask
-flask_sqlalchemy
+Flask
+Flask-SQLAlchemy
 pandas
 matplotlib
 openpyxl
 gunicorn
-
-
+psycopg2-binary

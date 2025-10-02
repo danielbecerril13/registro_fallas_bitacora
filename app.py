@@ -484,5 +484,8 @@ def reiniciar_semana():
     db.session.commit()
     return redirect(url_for("historial"))
 
+
+# ✅ Render usa 'gunicorn app:app', así que no cierres la app aquí
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True)  # Esto solo se ejecuta en local
+

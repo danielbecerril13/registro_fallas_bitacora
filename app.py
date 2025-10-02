@@ -62,7 +62,6 @@ LINEAS_MAQUINAS = {
     "LINEA - TUBOS HIBRIDOS": ["TH1", "TH2", "TH3","TH4"],
 }
 
-}
 
 TIPOS_FALLAS = ["Falla eléctrica","Falla Mecanica","Falla Hidraulica","Falla Neumatica","Falla Control Electrico","Falla Control PLC","Falla Camara/Escaner","Otro"]
 

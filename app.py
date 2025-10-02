@@ -485,7 +485,6 @@ def reiniciar_semana():
     return redirect(url_for("historial"))
 
 
-# ✅ Render usa 'gunicorn app:app', así que no cierres la app aquí
 if __name__ == "__main__":
-    app.run(debug=True)  # Esto solo se ejecuta en local
+ app.run(host="0.0.0.0", port=5000)
 

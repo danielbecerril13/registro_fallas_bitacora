@@ -1,4 +1,8 @@
 flask
+flask_sqlalchemy
 pandas
 matplotlib
+openpyxl
 gunicorn
+
+

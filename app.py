@@ -4,14 +4,40 @@ import matplotlib.pyplot as plt
 import io, os, json, urllib.parse, time
 from datetime import datetime
 import datetime as dt
+from flask_sqlalchemy import SQLAlchemy
 
+# ================== APP & DB ==================
 app = Flask(__name__)
 
-DATA_FILE = "fallas.csv"
+# Configuración DB (Render usa DATABASE_URL como env var)
+db_url = os.environ.get("DATABASE_URL")
+if db_url and db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://")
 
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url or "sqlite:///fallas.db"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db = SQLAlchemy(app)
+
+# ================== MODELO ==================
+class Falla(db.Model):
+    id = db.Column(db.BigInteger, primary_key=True)
+    nombre = db.Column(db.String(200))
+    numeroEmpleado = db.Column(db.String(50))
+    linea = db.Column(db.String(200))
+    machine = db.Column(db.String(200))
+    failure = db.Column(db.String(200))
+    startISO = db.Column(db.String(80))
+    endISO = db.Column(db.String(80))
+    durationMin = db.Column(db.Integer)
+    notes = db.Column(db.Text)
+    fecha = db.Column(db.String(20))
+
+with app.app_context():
+    db.create_all()
+
+# ================== CONFIG INICIAL ==================
 COLUMNS = ["id","nombre","numeroEmpleado","linea","machine","failure","startISO","endISO","durationMin","notes","fecha"]
 
-# Números de WhatsApp predeterminados (nombre: número con código de país)
 NUMEROS_WHATSAPP = {
     "Jose Vitela": "528443434019",
     "Daniel Becerril": "528443507879",
@@ -20,7 +46,6 @@ NUMEROS_WHATSAPP = {
     "David Belmares": "528446621177"
 }
 
-# Diccionario de líneas y máquinas (recortado para legibilidad; agregar el resto si hace falta)
 LINEAS_MAQUINAS = {
     "Modulo Flex 2": ["OP90", "OP95", "OP100", "OP110", "OP120", "OP130", "OP140", "OP150", "OP160", "OP170", "OP175", "PACKOUT"],
     "Modulo Flex 1": ["OPFA17", "OPFA16", "OPFA10", "OPFA20", "OPFA15", "OPFA50", "OPFA30", "OPMA010 MARCADO LASER", "OPF010", "OPF011", "OF020", "OPF030", "OPF031", "OPF040", "OPF040", "OPF041", "OPF031", "OPF12 RULADO", "OPF031", "OPFA040", "OPF071", "OPFA060", "OPF100", "OPF101", "OPF115", "OPF116", "PACKOUT"],
@@ -37,27 +62,31 @@ LINEAS_MAQUINAS = {
     "LINEA - TUBOS HIBRIDOS": ["TH1", "TH2", "TH3","TH4"],
 }
 
+}
+
 TIPOS_FALLAS = ["Falla eléctrica","Falla Mecanica","Falla Hidraulica","Falla Neumatica","Falla Control Electrico","Falla Control PLC","Falla Camara/Escaner","Otro"]
 
-def ensure_datafile():
-    if not os.path.exists(DATA_FILE):
-        df = pd.DataFrame(columns=COLUMNS)
-        df.to_csv(DATA_FILE, index=False)
-
-ensure_datafile()
-
+# ================== AUX ==================
 def limpiar_fallas_semanales():
-    ensure_datafile()
-    df = pd.read_csv(DATA_FILE)
-    if df.empty:
-        return
-    if "fecha" not in df.columns:
-        return
-    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+    # Elimina fallas que no pertenecen a la semana actual (persistente en DB)
     semana_actual = dt.datetime.now().isocalendar().week
     año_actual = dt.datetime.now().year
-    df = df[(df["fecha"].dt.isocalendar().week == semana_actual) & (df["fecha"].dt.year == año_actual)]
-    df.to_csv(DATA_FILE, index=False)
+    fallas = Falla.query.all()
+    for f in fallas:
+        try:
+            fecha_f = datetime.fromisoformat(f.fecha)
+            if not (fecha_f.isocalendar()[1] == semana_actual and fecha_f.year == año_actual):
+                db.session.delete(f)
+        except Exception:
+            # si la fecha no es ISO válida, intentar parseo simple YYYY-MM-DD
+            try:
+                fecha_f = datetime.strptime(f.fecha, "%Y-%m-%d")
+                if not (fecha_f.isocalendar()[1] == semana_actual and fecha_f.year == año_actual):
+                    db.session.delete(f)
+            except Exception:
+                # si falla el parseo, lo dejamos
+                continue
+    db.session.commit()
 
 def parse_datetime_input(val):
     if not isinstance(val, str) or not val.strip():
@@ -72,7 +101,7 @@ def parse_datetime_input(val):
     except Exception:
         return None, val
 
-# ================= Templates (tema fijo) =================
+# ================== TEMPLATES (idénticos a tu app anterior) ==================
 form_template = r"""
 <!DOCTYPE html>
 <html lang="es">
@@ -207,7 +236,7 @@ historial_template = r"""
 </body></html>
 """
 
-# ================= RUTAS =================
+# ================== RUTAS ==================
 @app.route("/")
 def index():
     limpiar_fallas_semanales()
@@ -228,58 +257,93 @@ def registrar():
     start_dt, start_iso = parse_datetime_input(start_raw)
     end_dt, end_iso = parse_datetime_input(end_raw)
 
-    duration = ""
+    duration = None
     if start_dt and end_dt:
         duration = int((end_dt - start_dt).total_seconds() // 60)
 
     id_val = int(time.time()*1000)
-    row = {
-        "id": id_val,
-        "nombre": nombre,
-        "numeroEmpleado": numeroEmpleado,
-        "linea": linea,
-        "machine": machine,
-        "failure": failure,
-        "startISO": start_iso,
-        "endISO": end_iso,
-        "durationMin": duration,
-        "notes": notes,
-        "fecha": datetime.now().strftime("%Y-%m-%d")
-    }
-    df = pd.read_csv(DATA_FILE)
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_csv(DATA_FILE, index=False)
+    row = Falla(
+        id=id_val,
+        nombre=nombre,
+        numeroEmpleado=numeroEmpleado,
+        linea=linea,
+        machine=machine,
+        failure=failure,
+        startISO=start_iso,
+        endISO=end_iso,
+        durationMin=duration,
+        notes=notes,
+        fecha=datetime.now().strftime("%Y-%m-%d")
+    )
+    db.session.add(row)
+    db.session.commit()
     return render_template_string(confirm_template)
 
-@app.route("/importar", methods=["POST"])
-def importar():
-    file = request.files.get("importFile")
-    if not file:
-        return redirect(url_for("index"))
-    try:
-        imported = pd.read_csv(file)
-        existing = pd.read_csv(DATA_FILE)
-        # intentar concatenar columnas compatibles
-        common = [c for c in imported.columns if c in existing.columns]
-        if not common:
-            return "CSV no compatible (no se encontraron columnas comunes)."
-        merged = pd.concat([existing, imported[common]], ignore_index=True, sort=False)
-        merged.to_csv(DATA_FILE, index=False)
-    except Exception as e:
-        return f"Error al importar CSV: {e}"
-    return redirect(url_for("index"))
-
+@app.route("/exportar")
+def exportar():
+    fallas = Falla.query.all()
+    if not fallas:
+        return "No hay datos para exportar"
+    df = pd.DataFrame([{
+        "id": f.id,
+        "nombre": f.nombre,
+        "numeroEmpleado": f.numeroEmpleado,
+        "linea": f.linea,
+        "machine": f.machine,
+        "failure": f.failure,
+        "startISO": f.startISO,
+        "endISO": f.endISO,
+        "durationMin": f.durationMin,
+        "notes": f.notes,
+        "fecha": f.fecha
+    } for f in fallas])
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="fallas")
+    output.seek(0)
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="fallas_export.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 @app.route("/historial")
 def historial():
-    df = pd.read_csv(DATA_FILE)
-    table_html = df.to_html(index=False)
+    fallas = Falla.query.order_by(Falla.fecha.asc()).all()
+    df = pd.DataFrame([{
+        "id": f.id,
+        "nombre": f.nombre,
+        "numeroEmpleado": f.numeroEmpleado,
+        "linea": f.linea,
+        "machine": f.machine,
+        "failure": f.failure,
+        "startISO": f.startISO,
+        "endISO": f.endISO,
+        "durationMin": f.durationMin,
+        "notes": f.notes,
+        "fecha": f.fecha
+    } for f in fallas])
+    table_html = df.to_html(index=False) if not df.empty else "<p>No hay registros</p>"
     return render_template_string(historial_template, table=table_html)
 
 @app.route("/grafica")
 def grafica():
-    df = pd.read_csv(DATA_FILE)
-    if df.empty:
+    fallas = Falla.query.all()
+    if not fallas:
         return "No hay datos para graficar"
+    df = pd.DataFrame([{
+        "id": f.id,
+        "nombre": f.nombre,
+        "numeroEmpleado": f.numeroEmpleado,
+        "linea": f.linea,
+        "machine": f.machine,
+        "failure": f.failure,
+        "startISO": f.startISO,
+        "endISO": f.endISO,
+        "durationMin": f.durationMin,
+        "notes": f.notes,
+        "fecha": f.fecha
+    } for f in fallas])
     counts = df["linea"].value_counts()
     plt.figure(figsize=(8,5))
     counts.plot(kind="bar", color='skyblue')
@@ -296,7 +360,22 @@ def grafica():
 
 @app.route("/exportar")
 def exportar():
-    df = pd.read_csv(DATA_FILE)
+    fallas = Falla.query.all()
+    if not fallas:
+        return "No hay datos para exportar"
+    df = pd.DataFrame([{
+        "id": f.id,
+        "nombre": f.nombre,
+        "numeroEmpleado": f.numeroEmpleado,
+        "linea": f.linea,
+        "machine": f.machine,
+        "failure": f.failure,
+        "startISO": f.startISO,
+        "endISO": f.endISO,
+        "durationMin": f.durationMin,
+        "notes": f.notes,
+        "fecha": f.fecha
+    } for f in fallas])
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="fallas")
@@ -305,16 +384,25 @@ def exportar():
 
 @app.route("/preparar_envio")
 def preparar_envio():
-    df = pd.read_csv(DATA_FILE)
     hoy = datetime.now().strftime("%Y-%m-%d")
-    df_today = df[df["fecha"] == hoy] if "fecha" in df.columns else df
+    fallas = Falla.query.filter_by(fecha=hoy).all()
+    df_today = pd.DataFrame([{
+        "id": f.id,
+        "nombre": f.nombre,
+        "numeroEmpleado": f.numeroEmpleado,
+        "linea": f.linea,
+        "machine": f.machine,
+        "failure": f.failure,
+        "startISO": f.startISO,
+        "endISO": f.endISO,
+        "durationMin": f.durationMin,
+        "notes": f.notes,
+        "fecha": f.fecha
+    } for f in fallas]) if fallas else pd.DataFrame()
     return render_template_string(preparar_envio_template, df_today=df_today, numeros=NUMEROS_WHATSAPP)
 
 @app.route("/enviar_whatsapp", methods=["POST"])
 def enviar_whatsapp():
-    df = pd.read_csv(DATA_FILE)
-    if df.empty:
-        return "No hay reportes de fallas registrados."
     selected_ids = request.form.getlist("selected_ids")
     manual_num = request.form.get("manual_num","").strip()
     destinatarios = request.form.getlist("destinatarios")
@@ -323,18 +411,21 @@ def enviar_whatsapp():
         destinatarios.append(manual_num)
     if not destinatarios:
         return "No seleccionaste destinatarios."
+
     if selected_ids:
-        df_sel = df[df["id"].astype(str).isin(selected_ids)]
+        # obtener seleccionados
+        fallas_q = Falla.query.filter(Falla.id.in_([int(i) for i in selected_ids])).all()
     else:
         hoy = datetime.now().strftime("%Y-%m-%d")
-        df_sel = df[df["fecha"] == hoy] if "fecha" in df.columns else df
-    if df_sel.empty:
+        fallas_q = Falla.query.filter_by(fecha=hoy).all()
+
+    if not fallas_q:
         return "No hay fallas seleccionadas para enviar."
 
     mensaje = "📋 *Reporte de Fallas*\n\n"
-    for _, row in df_sel.iterrows():
-        start = row.get("startISO") or row.get("start","")
-        end = row.get("endISO") or row.get("end","")
+    for row in fallas_q:
+        start = row.startISO or ""
+        end = row.endISO or ""
         try:
             s = datetime.fromisoformat(start).strftime("%Y-%m-%d %H:%M") if start else ""
         except:
@@ -343,14 +434,14 @@ def enviar_whatsapp():
             e = datetime.fromisoformat(end).strftime("%Y-%m-%d %H:%M") if end else ""
         except:
             e = end
-        mensaje += f"👤 {row.get('nombre','')} (Emp {row.get('numeroEmpleado','')})\n"
-        mensaje += f"🏭 {row.get('linea','')} | ⚙️ {row.get('machine','')}\n"
-        mensaje += f"❌ {row.get('failure','')}\n"
-        mensaje += f"⏱️ {s} - {e} ({row.get('durationMin','')} min)\n"
-        mensaje += f"📝 {row.get('notes','')}\n"
+        mensaje += f"👤 {row.nombre or ''} (Emp {row.numeroEmpleado or ''})\n"
+        mensaje += f"🏭 {row.linea or ''} | ⚙️ {row.machine or ''}\n"
+        mensaje += f"❌ {row.failure or ''}\n"
+        mensaje += f"⏱️ {s} - {e} ({row.durationMin if row.durationMin is not None else ''} min)\n"
+        mensaje += f"📝 {row.notes or ''}\n"
         mensaje += "-------------------------\n"
-    mensaje_enc = urllib.parse.quote(mensaje)
 
+    mensaje_enc = urllib.parse.quote(mensaje)
     enlaces = []
     for num in destinatarios:
         n = num.strip()
@@ -389,8 +480,9 @@ setTimeout(()=>{ document.body.innerHTML += "<p style='text-align:center'>Si no 
 
 @app.route("/reiniciar_semana", methods=["POST"])
 def reiniciar_semana():
-    df = pd.DataFrame(columns=COLUMNS)
-    df.to_csv(DATA_FILE, index=False)
+    # Borrar todas las fallas (reiniciar)
+    db.session.query(Falla).delete()
+    db.session.commit()
     return redirect(url_for("historial"))
 
 if __name__ == "__main__":

@@ -357,29 +357,6 @@ def grafica():
     img.seek(0)
     return send_file(img, mimetype="image/png")
 
-
-    fallas = Falla.query.all()
-    if not fallas:
-        return "No hay datos para exportar"
-    df = pd.DataFrame([{
-        "id": f.id,
-        "nombre": f.nombre,
-        "numeroEmpleado": f.numeroEmpleado,
-        "linea": f.linea,
-        "machine": f.machine,
-        "failure": f.failure,
-        "startISO": f.startISO,
-        "endISO": f.endISO,
-        "durationMin": f.durationMin,
-        "notes": f.notes,
-        "fecha": f.fecha
-    } for f in fallas])
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="fallas")
-    output.seek(0)
-    return send_file(output, as_attachment=True, download_name="fallas_export.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
 @app.route("/preparar_envio")
 def preparar_envio():
     hoy = datetime.now().strftime("%Y-%m-%d")

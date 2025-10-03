@@ -1,14 +1,21 @@
-from flask import Flask, render_template_string, request, redirect, url_for, send_file, jsonify
+# app.py (completo) - integra todas las funciones previas + las nuevas condiciones solicitadas
+from flask import Flask, render_template_string, request, redirect, url_for, send_file, jsonify, Response
 import pandas as pd
 import matplotlib.pyplot as plt
-import io, os, json, urllib.parse, time
+import io, os, json, urllib.parse, time, tempfile, threading
 from datetime import datetime
 import datetime as dt
 
 app = Flask(__name__)
 
+# -----------------------
+# Configuración / Constantes
+# -----------------------
 DATA_FILE = "fallas.csv"
 COLUMNS = ["id","nombre","numeroEmpleado","linea","machine","failure","startISO","endISO","durationMin","notes","fecha"]
+
+# Password sencillo para borrar todo (puedes cambiarlo o leer de variable de entorno)
+CLEAR_PASSWORD = "1234"
 
 # Números de WhatsApp predeterminados (nombre: número con código de país)
 NUMEROS_WHATSAPP = {
@@ -32,20 +39,44 @@ LINEAS_MAQUINAS = {
     "Cooler Flex 3": ["OP20", "OP21", "OP22", "OP30", "OP40-A", "OP40-B", "OP50", "OP60", "OP100-A", "OP100-B", "OP100-C", "OP100D.A", "OP100D.B", "OP100-E", "OPMA41"],
     "Cooler EHRS": ["OP10", "OP20", "OP30", "OP40", "OP50", "OP60", "OP10-A", "OP10-B", "OP10-C", "OP20-A", "OP30-A", "OP40-A", "OP40-B", "OP50-B"],
     "LINEA - SUBENSAMBLES COOLER": ["CONFORMADO 1", "CONFORMADO 2","CONFORMADO 3","DUNIMEX INLET","DUNIMEX OUTLET", "ITF", "CORTE ORBITAL 1", "CURVADORA 1", "PUNZONADO TUBO OUTLET OP40", "Cortadora tubo outlet OP30", "Aborcadado tubo outlet OP20", "Curvadora 4", "Curvadora 3", "Corte orbital 3", "Silfax 1", "Silfax 2", "Corte vertical 1", "Punzonado EGR", "Punzonado difusor", "Op110", "Op120", "Aborcadado de cyclone", "Corte vertical 2", "Corte vertical 3"],
+    "LINEA - HORNOS": ["H1", "H2", "H3","H4"],
     "LINEA - SUBENSAMBLES CYCLONE": ["Opma051", "S100", "OP030", "S100", "S90", "S70", "S50", "S70A soldadora", "S30", "S60", "OP40A","OP40B", "OP80A","OP80B"],
     "LINEA - TUBOS HIBRIDOS": ["TH1", "TH2", "TH3","TH4"],
+
 }
 
 TIPOS_FALLAS = ["Falla eléctrica","Falla Mecanica","Falla Hidraulica","Falla Neumatica","Falla Control Electrico","Falla Control PLC","Falla Camara/Escaner","Otro"]
 
+# -----------------------
+# Helpers para datos
+# -----------------------
 def ensure_datafile():
     if not os.path.exists(DATA_FILE):
         df = pd.DataFrame(columns=COLUMNS)
         df.to_csv(DATA_FILE, index=False)
 
-ensure_datafile()
+def load_data():
+    ensure_datafile()
+    try:
+        df = pd.read_csv(DATA_FILE)
+        # Asegurar que estén las columnas esperadas
+        for c in COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        return df
+    except Exception:
+        # Si hay problema al leer, crear vacío
+        return pd.DataFrame(columns=COLUMNS)
+
+def save_data(df):
+    df.to_csv(DATA_FILE, index=False)
 
 def limpiar_fallas_semanales():
+    """
+    Mantengo la funcionalidad original: al cargar/registrar, se filtran
+    y se guardan solo las fallas de la semana actual (si existe campo 'fecha').
+    Si no quieres este comportamiento, quítame las llamadas a esta función.
+    """
     ensure_datafile()
     df = pd.read_csv(DATA_FILE)
     if df.empty:
@@ -71,37 +102,34 @@ def parse_datetime_input(val):
     except Exception:
         return None, val
 
-# ----------------- Plantilla HTML (index) -----------------
+# -----------------------
+# Plantilla HTML principal (index)
+# -----------------------
 index_template = r"""
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8"/>
   <title>Registro de Fallas</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    body { font-family: Arial, sans-serif; margin:0; padding:0; background:#0404b6; color:#f5f5f5; }
-    header { background:#0f176e; padding:15px; text-align:center; font-size:22px; font-weight:bold; color:#f5f5f5; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }
-    .container { padding:20px; max-width:1100px; margin:0 auto; }
-    .form { display:flex; flex-wrap:wrap; gap:15px; margin-bottom:20px; background:#000106; padding:15px; border-radius:10px; }
-    .form div { flex:1; min-width:220px; }
-    label { display:block; margin-bottom:5px; font-weight:bold; color:#a0aec0; }
-    input, select, textarea { width:100%; padding:8px; border-radius:6px; border:none; background:#3a3f5c; color:#fff; }
-    textarea { resize:vertical; min-height:80px; }
-    button { margin:5px 5px 5px 0; padding:10px 15px; border:none; border-radius:6px; cursor:pointer; font-weight:bold; color:#fff; }
-    .btn-primary { background:#4cafef; }
-    .btn-green { background:#00b894; }
-    .btn-orange { background:#e67e22; }
-    .btn-red { background:#e74c3c; }
-    table { width:100%; border-collapse:collapse; margin-top:15px; background:#010736; border-radius:10px; overflow:hidden; }
-    th, td { border:1px solid #444; padding:6px; text-align:left; font-size:13px; }
-    th { background:#010736; color:#f5f5f5; }
-    tr:nth-child(even) { background:#35384e; }
-    tr:nth-child(odd) { background:#2f3247; }
-    .charts { display:flex; flex-wrap:wrap; gap:20px; margin-top:20px; }
-    .chart-container { flex:1; min-width:300px; background:#010736; padding:15px; border-radius:10px; }
-    .small { font-size:12px; color:#cbd5e1; }
-    .top-actions { margin-bottom:10px; }
+    body{ font-family: Arial, sans-serif; margin:0; padding:0; background:#0404b6; color:#f5f5f5; }
+    header{ background:#0f176e; padding:12px; color:#f5f5f5; font-weight:bold; text-align:center; }
+    .container{ padding:16px; max-width:1200px; margin:12px auto; }
+    .form{ display:flex; flex-wrap:wrap; gap:12px; background:#000106; padding:12px; border-radius:8px; }
+    .form div{ flex:1; min-width:220px; }
+    label{ display:block; margin-bottom:6px; color:#a0aec0; font-weight:bold; }
+    input,select,textarea{ width:100%; padding:8px; border-radius:6px; border:none; background:#2b2f48; color:#f5f5f5; }
+    textarea{ min-height:100px; }
+    button{ padding:10px 14px; border-radius:8px; border:none; cursor:pointer; font-weight:bold; color:#fff; margin:6px 6px 6px 0; }
+    .btn-primary{ background:#4cafef; } .btn-green{ background:#00b894; } .btn-orange{ background:#e67e22; } .btn-red{ background:#e74c3c; }
+    table{ width:100%; border-collapse:collapse; margin-top:12px; background:#010736; border-radius:8px; overflow:hidden; }
+    th,td{ border:1px solid #333; padding:6px; font-size:13px; text-align:left; }
+    th{ background:#010736; color:#f5f5f5; }
+    tr:nth-child(even){ background:#35384e; } tr:nth-child(odd){ background:#2f3247; }
+    .charts{ display:flex; gap:16px; margin-top:16px; flex-wrap:wrap; }
+    .chart-container{ background:#010736; padding:12px; border-radius:8px; min-width:300px; flex:1; }
+    .small{ font-size:12px; color:#cbd5e1; }
   </style>
 </head>
 <body>
@@ -118,31 +146,28 @@ index_template = r"""
       </div>
       <div>
         <label>Máquina</label>
-        <select id="inputMachine" name="machine" disabled required>
-          <option value="">Selecciona una línea primero</option>
-        </select>
+        <select id="inputMachine" name="machine" disabled required><option>Selecciona una línea primero</option></select>
       </div>
-      <div style="flex:1;min-width:220px">
+      <div style="min-width:220px;">
         <label>Tipo de falla</label>
         <select id="inputFailure" name="failure" required>
           <option value="" disabled selected>Seleccionar / escribir</option>
-          {% for f in tipos_fallas %}<option>{{f}}</option>{% endfor %}
+          {% for f in tipos_fallas %}<option>{{ f }}</option>{% endfor %}
         </select>
       </div>
       <div><label>Inicio</label><input type="datetime-local" id="inputStart" name="start" required></div>
       <div><label>Fin</label><input type="datetime-local" id="inputEnd" name="end"></div>
       <div><label>Notas</label><textarea id="inputNotes" name="notes"></textarea></div>
 
-      <!-- Opciones WhatsApp (si quieres controlar destinatarios) -->
       <div style="flex-basis:100%; text-align:left;">
-        <label class="small">Enviar WhatsApp a (opcional):</label>
+        <label class="small">Enviar WhatsApp a (opcional)</label>
         <select name="numeroWhatsapp" id="numeroWhatsapp">
-          <option value="">-- Selecciona contacto -- (si dejas vacío enviará a todos los contactos por defecto)</option>
+          <option value="">-- Selecciona contacto --</option>
           {% for nombre,num in numeros.items() %}
             <option value="{{ num }}">{{ nombre }} ({{ num }})</option>
           {% endfor %}
         </select>
-        <label class="small">Otro número (opcional, formato: 521XXXXXXXXXX o 528XXXXXXXXXX)</label>
+        <label class="small">Otro número (opc.)</label>
         <input name="numeroWhatsappManual" id="numeroWhatsappManual" placeholder="Ej: 528449998877">
       </div>
 
@@ -158,16 +183,15 @@ index_template = r"""
       <input id="importFile" name="importFile" type="file" accept=".csv" onchange="document.getElementById('importForm').submit();">
     </form>
 
-    <div class="top-actions">
+    <div style="margin-top:10px;">
       <button onclick="clearAll()" class="btn-red">Borrar Todo (servidor)</button>
+      <a class="btn-green" href="{{ url_for('preparar_envio') }}">Enviar Reporte WhatsApp (manual)</a>
     </div>
 
     <table id="dataTable">
       <thead>
         <tr>
-          <th>#</th><th>Nombre</th><th>No.Empleado</th>
-          <th>Línea</th><th>Máquina</th><th>Falla</th>
-          <th>Inicio</th><th>Fin</th><th>Duración (min)</th><th>Notas</th>
+          <th>#</th><th>Nombre</th><th>No.Empleado</th><th>Línea</th><th>Máquina</th><th>Falla</th><th>Inicio</th><th>Fin</th><th>Duración (min)</th><th>Notas</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -184,7 +208,7 @@ const lineas = {{ lineas_maquinas|tojson }};
 const tiposFallas = {{ tipos_fallas|tojson }};
 const numerosWhatsapp = {{ numeros|tojson }};
 
-const el = id=>document.getElementById(id);
+const el = id => document.getElementById(id);
 function llenarLineas(){
   const sel = el("inputLinea");
   Object.keys(lineas).forEach(l=>{
@@ -205,7 +229,6 @@ el("inputLinea").onchange = ()=>{
     });
   }
 };
-
 llenarLineas();
 
 async function fetchData(){
@@ -215,9 +238,7 @@ async function fetchData(){
 
 function formatDate(iso){
   if(!iso) return "";
-  try{
-    return new Date(iso).toLocaleString();
-  }catch(e){ return iso; }
+  try{ return new Date(iso).toLocaleString(); }catch(e){ return iso; }
 }
 
 function renderTable(data){
@@ -248,10 +269,8 @@ function renderCharts(data){
     counts[f] = (counts[f]||0)+1;
     if(r.durationMin) times[f] = (times[f]||0) + Number(r.durationMin);
   });
-  const labels1 = Object.keys(counts);
-  const values1 = labels1.map(l=>counts[l]);
-  const labels2 = Object.keys(times);
-  const values2 = labels2.map(l=>times[l]);
+  const labels1 = Object.keys(counts), values1 = labels1.map(l=>counts[l]);
+  const labels2 = Object.keys(times), values2 = labels2.map(l=>times[l]);
 
   const ctx1 = el("chartFailures").getContext("2d");
   const ctx2 = el("chartDowntime").getContext("2d");
@@ -268,21 +287,24 @@ async function refreshUI(){
 }
 refreshUI();
 
-// llamada automática: cuando el form se envía por POST, el servidor guarda y devuelve una página que abre los enlaces de WhatsApp.
-// Aquí solo actualizamos UI si el usuario no es redirigido.
-document.getElementById("mainForm").addEventListener("submit", ()=>{ /* submit normal */ });
-
+// Borrar todo -> pide password (en frontend) y lo envía al servidor para validar
 async function clearAll(){
+  let pwd = prompt("Introduce el password para borrar:");
+  if(pwd === null) return;
   if(!confirm("¿Borrar todos los registros del servidor?")) return;
-  const res = await fetch("/clear", { method: "POST" });
-  if(res.ok){ refreshUI(); alert("Datos borrados."); }
+  const res = await fetch("/clear", { method: "POST", headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pwd}) });
+  if(res.status === 200){ refreshUI(); alert("Datos borrados."); }
+  else if(res.status === 403){ alert("Password incorrecto. No se borró nada."); }
+  else { alert("Error al borrar. Revisa el servidor."); }
 }
 </script>
 </body>
 </html>
 """
 
-# ----------------- Rutas -----------------
+# -----------------------
+# Rutas
+# -----------------------
 @app.route("/")
 def index():
     limpiar_fallas_semanales()
@@ -290,14 +312,15 @@ def index():
 
 @app.route("/data")
 def data_endpoint():
-    df = pd.read_csv(DATA_FILE)
-    # convertir a lista de dicts
+    df = load_data()
+    # devolver lista JSON
     records = df.to_dict(orient="records")
     return jsonify(records)
 
 @app.route("/registrar", methods=["POST"])
 def registrar():
     limpiar_fallas_semanales()
+    # Leer formulario
     nombre = request.form.get("nombre","").strip()
     numeroEmpleado = request.form.get("numeroEmpleado","").strip()
     linea = request.form.get("linea","").strip()
@@ -328,65 +351,69 @@ def registrar():
         "notes": notes,
         "fecha": datetime.now().strftime("%Y-%m-%d")
     }
-    df = pd.read_csv(DATA_FILE)
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_csv(DATA_FILE, index=False)
 
-    # --- Lógica para enviar WhatsApp AUTOMÁTICAMENTE después de guardar ---
-    # Determinar destinatarios: si se escogió uno en el formulario o se puso número manual.
-    destinatarios = []
-    sel = request.form.get("numeroWhatsapp","").strip()
-    manual = request.form.get("numeroWhatsappManual","").strip()
-    if sel:
-        destinatarios.append(sel)
-    if manual:
-        # limpiar caracteres comunes
-        m = manual.replace("+","").replace(" ","")
-        destinatarios.append(m)
-    # Si no se proporcionó ningún destinatario, enviar a todos los contactos predeterminados
-    if not destinatarios:
-        destinatarios = list(NUMEROS_WHATSAPP.values())
+    df = load_data()
+    df = pd.concat([pd.DataFrame([row]), df], ignore_index=True)
+    save_data(df)
 
-    # Construir mensaje (mismo formato que antes)
-    mensaje = "📋 *Reporte de Fallas*\n\n"
-    s = ""
-    e = ""
+    # --- WhatsApp AUTOMÁTICO solo si duration > 40 ---
     try:
-        s = datetime.fromisoformat(start_iso).strftime("%Y-%m-%d %H:%M") if start_iso else ""
+        dur_val = int(duration) if duration != "" else 0
     except:
-        s = start_iso or ""
-    try:
-        e = datetime.fromisoformat(end_iso).strftime("%Y-%m-%d %H:%M") if end_iso else ""
-    except:
-        e = end_iso or ""
-    mensaje += f"👤 {nombre} (Emp {numeroEmpleado})\n"
-    mensaje += f"🏭 {linea} | ⚙️ {machine}\n"
-    mensaje += f"❌ {failure}\n"
-    mensaje += f"⏱️ {s} - {e} ({duration} min)\n"
-    mensaje += f"📝 {notes}\n"
-    mensaje += "-------------------------\n"
-    mensaje_enc = urllib.parse.quote(mensaje)
+        dur_val = 0
 
-    enlaces = []
-    for num in destinatarios:
-        n = str(num).strip()
-        if n.startswith("+"):
-            n = n.replace("+","")
-        if n.startswith("52"):
-            n_clean = n
-        else:
-            if n.startswith("0"):
-                n_clean = "52" + n.lstrip("0")
-            elif len(n) == 10 and n.isdigit():
-                n_clean = "52" + n
-            else:
+    if dur_val and dur_val > 40:
+        # determinar destinatarios
+        destinatarios = []
+        sel = request.form.get("numeroWhatsapp","").strip()
+        manual = request.form.get("numeroWhatsappManual","").strip()
+        if sel: destinatarios.append(sel)
+        if manual:
+            m = manual.replace("+","").replace(" ","")
+            destinatarios.append(m)
+        if not destinatarios:
+            destinatarios = list(NUMEROS_WHATSAPP.values())
+
+        # construir mensaje (solo para la falla registrada ahora)
+        mensaje = "📋 *Reporte de Falla (Automático)*\n\n"
+        s = ""
+        e = ""
+        try:
+            s = datetime.fromisoformat(start_iso).strftime("%Y-%m-%d %H:%M") if start_iso else ""
+        except:
+            s = start_iso or ""
+        try:
+            e = datetime.fromisoformat(end_iso).strftime("%Y-%m-%d %H:%M") if end_iso else ""
+        except:
+            e = end_iso or ""
+        mensaje += f"👤 {nombre} (Emp {numeroEmpleado})\n"
+        mensaje += f"🏭 {linea} | ⚙️ {machine}\n"
+        mensaje += f"❌ {failure}\n"
+        mensaje += f"⏱️ {s} - {e} ({duration} min)\n"
+        mensaje += f"📝 {notes}\n"
+        mensaje += "-------------------------\n"
+        mensaje_enc = urllib.parse.quote(mensaje)
+
+        enlaces = []
+        for num in destinatarios:
+            n = str(num).strip()
+            if n.startswith("+"):
+                n = n.replace("+","")
+            if n.startswith("52"):
                 n_clean = n
-        enlaces.append(f"https://wa.me/{n_clean}?text={mensaje_enc}")
+            else:
+                if n.startswith("0"):
+                    n_clean = "52" + n.lstrip("0")
+                elif len(n) == 10 and n.isdigit():
+                    n_clean = "52" + n
+                else:
+                    n_clean = n
+            enlaces.append(f"https://wa.me/{n_clean}?text={mensaje_enc}")
 
-    # Devolver HTML que abrirá los chats (comportamiento móvil: whatsapp://send)
-    html_open = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Enviando...</title></head><body style='font-family:Arial;text-align:center;'><h3>📲 Abriendo chats de WhatsApp...</h3><p>Si no se abren automáticamente, aparecerán los enlaces debajo.</p><script>\n"
-    html_open += "let enlaces = " + json.dumps(enlaces) + ";\n"
-    html_open += """
+        # devolver HTML que abre los chats (telefónico: whatsapp://send, escritorio: wa.me)
+        html_open = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Enviando...</title></head><body style='font-family:Arial;text-align:center;'><h3>📲 Abriendo chats de WhatsApp...</h3><p>Si no se abren automáticamente, aparecerán los enlaces debajo.</p><script>\n"
+        html_open += "let enlaces = " + json.dumps(enlaces) + ";\n"
+        html_open += """
 function esMovil(){ return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent); }
 enlaces.forEach((url,idx)=>{
   setTimeout(()=>{
@@ -405,7 +432,10 @@ enlaces.forEach((url,idx)=>{
 setTimeout(()=>{ document.body.innerHTML += "<hr><div>"; enlaces.forEach(u=>document.body.innerHTML += '<p><a href="'+u+'" target="_blank">'+u+'</a></p>'); document.body.innerHTML += '</div>'; }, enlaces.length*800 + 400);
 </script></body></html>
 """
-    return html_open
+        return html_open
+
+    # si no supera 40 min, solo guardar y volver al index
+    return redirect(url_for("index"))
 
 @app.route("/importar", methods=["POST"])
 def importar():
@@ -414,8 +444,7 @@ def importar():
         return redirect(url_for("index"))
     try:
         imported = pd.read_csv(file)
-        existing = pd.read_csv(DATA_FILE)
-        # intentar concatenar columnas compatibles
+        existing = load_data()
         common = [c for c in imported.columns if c in existing.columns]
         if not common:
             return "CSV no compatible (no se encontraron columnas comunes)."
@@ -427,13 +456,13 @@ def importar():
 
 @app.route("/historial")
 def historial():
-    df = pd.read_csv(DATA_FILE)
+    df = load_data()
     table_html = df.to_html(index=False)
     return f"<html><head><meta charset='utf-8'><title>Historial</title></head><body style='font-family:Arial'><h2>Historial de Fallas</h2><div style='max-width:95%;'>{table_html}</div><br><a href='{url_for('index')}'>📝 Registrar Falla</a></body></html>"
 
 @app.route("/grafica")
 def grafica():
-    df = pd.read_csv(DATA_FILE)
+    df = load_data()
     if df.empty:
         return "No hay datos para graficar"
     counts = df["linea"].value_counts()
@@ -452,40 +481,58 @@ def grafica():
 
 @app.route("/exportar")
 def exportar():
-    df = pd.read_csv(DATA_FILE)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="fallas")
-    output.seek(0)
-    return send_file(output, as_attachment=True, download_name="fallas_export.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    df = load_data()
+    # crear archivo temporal (se sobreescribe cada vez con timestamp)
+    temp_dir = tempfile.gettempdir()
+    fname = f"fallas_export_{int(time.time())}.xlsx"
+    temp_file = os.path.join(temp_dir, fname)
+    try:
+        with pd.ExcelWriter(temp_file, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="fallas")
+    except Exception as e:
+        return f"Error generando Excel: {e}"
+    # borrar el archivo pasado unos segundos para limpieza (hilo separado)
+    def _cleanup(path, delay=30):
+        def _rm():
+            try:
+                time.sleep(delay)
+                if os.path.exists(path):
+                    os.remove(path)
+            except:
+                pass
+        threading.Thread(target=_rm, daemon=True).start()
+    _cleanup(temp_file, delay=30)
+    return send_file(temp_file, as_attachment=True, download_name="fallas_export.xlsx")
 
 @app.route("/preparar_envio")
 def preparar_envio():
-    df = pd.read_csv(DATA_FILE)
-    hoy = datetime.now().strftime("%Y-%m-%d")
-    df_today = df[df["fecha"] == hoy] if "fecha" in df.columns else df
-    # pagina simple para seleccionar y enviar manualmente
+    """
+    Página que permite seleccionar varias fallas (desde todo el historial)
+    y destinatarios para enviar un reporte manual por WhatsApp.
+    """
+    df = load_data()
     rows_html = ""
-    if df_today.empty:
-        rows_html = "<p>No hay fallas hoy.</p>"
+    if df.empty:
+        rows_html = "<p>No hay fallas registradas.</p>"
     else:
-        rows_html = "<form method='post' action='" + url_for("enviar_whatsapp") + "'>"
-        rows_html += "<table border='1' style='margin:auto'><tr><th>Enviar</th><th>#</th><th>Nombre</th><th>Empleado</th><th>Línea</th><th>Máquina</th><th>Falla</th><th>Inicio</th><th>Fin</th><th>Notas</th></tr>"
-        for i, row in df_today.iterrows():
+        rows_html += "<form method='post' action='" + url_for("enviar_whatsapp") + "'>"
+        rows_html += "<table border='1' style='margin:auto'><tr><th>Enviar</th><th>#</th><th>Nombre</th><th>Empleado</th><th>Línea</th><th>Máquina</th><th>Falla</th><th>Inicio</th><th>Fin</th><th>Duración</th><th>Notas</th></tr>"
+        for i, row in df.iterrows():
             rows_html += "<tr>"
-            rows_html += f"<td><input type='checkbox' name='selected_ids' value='{row['id']}' checked></td>"
+            rows_html += f"<td><input type='checkbox' name='selected_ids' value='{row['id']}'></td>"
             rows_html += f"<td>{i+1}</td><td>{row.get('nombre','')}</td><td>{row.get('numeroEmpleado','')}</td><td>{row.get('linea','')}</td><td>{row.get('machine','')}</td><td>{row.get('failure','')}</td>"
-            rows_html += f"<td>{row.get('startISO','')}</td><td>{row.get('endISO','')}</td><td>{row.get('notes','')}</td>"
+            rows_html += f"<td>{row.get('startISO','')}</td><td>{row.get('endISO','')}</td><td>{row.get('durationMin','')}</td><td>{row.get('notes','')}</td>"
             rows_html += "</tr>"
         rows_html += "</table><h3>Destinatarios:</h3>"
         for nombre,num in NUMEROS_WHATSAPP.items():
-            rows_html += f"<input type='checkbox' name='destinatarios' value='{num}' checked> {nombre} ({num})<br>"
-        rows_html += "<br>Manual: <input type='text' name='manual_num' placeholder='Ej: 528449998877'><br><button type='submit'>Enviar WhatsApp</button></form>"
+            rows_html += f"<input type='checkbox' name='destinatarios' value='{num}'> {nombre} ({num})<br>"
+        rows_html += "<br>Manual (opcional): <input type='text' name='manual_num' placeholder='Ej: 528449998877'><br><br>"
+        rows_html += "<button type='submit'>Enviar WhatsApp</button></form>"
     return f"<html><head><meta charset='utf-8'><title>Preparar Envío</title></head><body style='font-family:Arial;text-align:center'><h2>Selecciona fallas y destinatarios</h2>{rows_html}<br><a href='{url_for('index')}'>Volver</a></body></html>"
 
 @app.route("/enviar_whatsapp", methods=["POST"])
 def enviar_whatsapp():
-    df = pd.read_csv(DATA_FILE)
+    df = load_data()
     if df.empty:
         return "No hay reportes de fallas registrados."
     selected_ids = request.form.getlist("selected_ids")
@@ -495,19 +542,19 @@ def enviar_whatsapp():
         manual_num = manual_num.replace("+","").replace(" ","")
         destinatarios.append(manual_num)
     if not destinatarios:
+        # si no se seleccionó destinatarios, no enviar (seguridad)
         return "No seleccionaste destinatarios."
     if selected_ids:
         df_sel = df[df["id"].astype(str).isin(selected_ids)]
     else:
-        hoy = datetime.now().strftime("%Y-%m-%d")
-        df_sel = df[df["fecha"] == hoy] if "fecha" in df.columns else df
+        return "No seleccionaste fallas para enviar."
     if df_sel.empty:
         return "No hay fallas seleccionadas para enviar."
 
-    mensaje = "📋 *Reporte de Fallas*\n\n"
+    mensaje = "📋 *Reporte de Fallas Seleccionadas*\n\n"
     for _, row in df_sel.iterrows():
-        start = row.get("startISO") or row.get("start","")
-        end = row.get("endISO") or row.get("end","")
+        start = row.get("startISO") or ""
+        end = row.get("endISO") or ""
         try:
             s = datetime.fromisoformat(start).strftime("%Y-%m-%d %H:%M") if start else ""
         except:
@@ -564,6 +611,17 @@ setTimeout(()=>{ document.body.innerHTML += "<p>Si no se abren automáticamente,
 
 @app.route("/clear", methods=["POST"])
 def clear():
+    """
+    Endpoint protegido: espera JSON { "password": "..." }
+    para borrar. Responde 200 si correcto, 403 si password incorrecto.
+    """
+    try:
+        data = request.get_json(force=True)
+    except:
+        data = {}
+    pwd = (data or {}).get("password","")
+    if pwd != CLEAR_PASSWORD:
+        return Response("Forbidden", status=403)
     df = pd.DataFrame(columns=COLUMNS)
     df.to_csv(DATA_FILE, index=False)
     return ("OK", 200)
@@ -574,6 +632,14 @@ def reiniciar_semana():
     df.to_csv(DATA_FILE, index=False)
     return redirect(url_for("historial"))
 
+# -----------------------
+# Arranque (Waitress recommended)
+# -----------------------
 if __name__ == "__main__":
-    # escucha en todas las interfaces para que sea accesible en la red local
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # Usa waitress para mayor estabilidad en Windows
+    try:
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=5000)
+    except Exception:
+        # fallback a Flask dev server si waitress no está instalado
+        app.run(host="0.0.0.0", port=5000, debug=False)

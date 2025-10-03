@@ -1,4 +1,4 @@
-# app.py (completo) - integra todas las funciones previas + las nuevas condiciones solicitadas
+# app.py - Versión consolidada y estable (con todas tus funciones + mejoras)
 from flask import Flask, render_template_string, request, redirect, url_for, send_file, jsonify, Response
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -59,13 +59,12 @@ def load_data():
     ensure_datafile()
     try:
         df = pd.read_csv(DATA_FILE)
-        # Asegurar que estén las columnas esperadas
+        # asegurar columnas
         for c in COLUMNS:
             if c not in df.columns:
                 df[c] = ""
         return df
     except Exception:
-        # Si hay problema al leer, crear vacío
         return pd.DataFrame(columns=COLUMNS)
 
 def save_data(df):
@@ -73,9 +72,9 @@ def save_data(df):
 
 def limpiar_fallas_semanales():
     """
-    Mantengo la funcionalidad original: al cargar/registrar, se filtran
-    y se guardan solo las fallas de la semana actual (si existe campo 'fecha').
-    Si no quieres este comportamiento, quítame las llamadas a esta función.
+    Mantengo la funcionalidad original: filtra y guarda solo fallas de la semana actual
+    si existe el campo 'fecha'. Si prefieres conservar todo el histórico, elimina
+    las llamadas a esta función.
     """
     ensure_datafile()
     df = pd.read_csv(DATA_FILE)
@@ -232,8 +231,14 @@ el("inputLinea").onchange = ()=>{
 llenarLineas();
 
 async function fetchData(){
-  const res = await fetch("/data");
-  return res.json();
+  try{
+    const res = await fetch("/data");
+    if(!res.ok) return [];
+    return await res.json();
+  }catch(e){
+    console.error("Error fetch data:", e);
+    return [];
+  }
 }
 
 function formatDate(iso){
@@ -244,6 +249,12 @@ function formatDate(iso){
 function renderTable(data){
   const tbody = document.querySelector("#dataTable tbody");
   tbody.innerHTML="";
+  if(!data || data.length === 0){
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="10" style="text-align:center;">No hay registros</td>';
+    tbody.appendChild(tr);
+    return;
+  }
   data.forEach((r,i)=>{
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${i+1}</td>
@@ -262,8 +273,20 @@ function renderTable(data){
 
 let chartFailures, chartDowntime;
 function renderCharts(data){
+  // asegurar arrays válidos
   const counts = {};
   const times = {};
+  if(!data || data.length === 0){
+    // si no hay datos, mostrar un gráfico simple "Sin datos"
+    const ctx1 = el("chartFailures").getContext("2d");
+    const ctx2 = el("chartDowntime").getContext("2d");
+    if(chartFailures) chartFailures.destroy();
+    if(chartDowntime) chartDowntime.destroy();
+    chartFailures = new Chart(ctx1, { type: "bar", data: { labels: ["Sin datos"], datasets: [{ label: "Cantidad", data: [0] }] } });
+    chartDowntime = new Chart(ctx2, { type: "bar", data: { labels: ["Sin datos"], datasets: [{ label: "Tiempo muerto (min)", data: [0] }] } });
+    return;
+  }
+
   data.forEach(r=>{
     const f = r.failure || "Sin tipo";
     counts[f] = (counts[f]||0)+1;
@@ -292,10 +315,14 @@ async function clearAll(){
   let pwd = prompt("Introduce el password para borrar:");
   if(pwd === null) return;
   if(!confirm("¿Borrar todos los registros del servidor?")) return;
-  const res = await fetch("/clear", { method: "POST", headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pwd}) });
-  if(res.status === 200){ refreshUI(); alert("Datos borrados."); }
-  else if(res.status === 403){ alert("Password incorrecto. No se borró nada."); }
-  else { alert("Error al borrar. Revisa el servidor."); }
+  try{
+    const res = await fetch("/clear", { method: "POST", headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pwd}) });
+    if(res.status === 200){ refreshUI(); alert("Datos borrados."); }
+    else if(res.status === 403){ alert("Password incorrecto. No se borró nada."); }
+    else { alert("Error al borrar. Revisa el servidor."); }
+  }catch(e){
+    alert("Error de red al borrar: " + e);
+  }
 }
 </script>
 </body>
@@ -313,7 +340,7 @@ def index():
 @app.route("/data")
 def data_endpoint():
     df = load_data()
-    # devolver lista JSON
+    # convertir a lista de dicts
     records = df.to_dict(orient="records")
     return jsonify(records)
 
@@ -443,8 +470,10 @@ def importar():
     if not file:
         return redirect(url_for("index"))
     try:
+        # pd.read_csv maneja comillas adecuadamente
         imported = pd.read_csv(file)
         existing = load_data()
+        # intentar concatenar columnas compatibles
         common = [c for c in imported.columns if c in existing.columns]
         if not common:
             return "CSV no compatible (no se encontraron columnas comunes)."
@@ -456,37 +485,51 @@ def importar():
 
 @app.route("/historial")
 def historial():
-    df = load_data()
-    table_html = df.to_html(index=False)
-    return f"<html><head><meta charset='utf-8'><title>Historial</title></head><body style='font-family:Arial'><h2>Historial de Fallas</h2><div style='max-width:95%;'>{table_html}</div><br><a href='{url_for('index')}'>📝 Registrar Falla</a></body></html>"
+    try:
+        df = load_data()
+        if df.empty:
+            table_html = "<p>No hay registros de fallas.</p>"
+        else:
+            table_html = df.to_html(index=False)
+        return f"<html><head><meta charset='utf-8'><title>Historial</title></head><body style='font-family:Arial'><h2>Historial de Fallas</h2><div style='max-width:95%;'>{table_html}</div><br><a href='{url_for('index')}'>📝 Registrar Falla</a></body></html>"
+    except Exception as e:
+        return f"<p>Error cargando historial: {e}</p>", 500
 
 @app.route("/grafica")
 def grafica():
-    df = load_data()
-    if df.empty:
-        return "No hay datos para graficar"
-    counts = df["linea"].value_counts()
-    plt.figure(figsize=(8,5))
-    counts.plot(kind="bar")
-    plt.title("Fallas por Línea")
-    plt.xlabel("Línea")
-    plt.ylabel("Cantidad")
-    plt.xticks(rotation=45)
-    img = io.BytesIO()
-    plt.tight_layout()
-    plt.savefig(img, format="png")
-    plt.close()
-    img.seek(0)
-    return send_file(img, mimetype="image/png")
+    try:
+        df = load_data()
+        plt.figure(figsize=(8,5))
+        if df.empty:
+            plt.text(0.5, 0.5, "Sin datos", ha="center", va="center", fontsize=16)
+            plt.axis("off")
+        else:
+            counts = df["linea"].value_counts()
+            counts.plot(kind="bar", color="skyblue")
+            plt.title("Fallas por Línea")
+            plt.xlabel("Línea")
+            plt.ylabel("Cantidad")
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+        img = io.BytesIO()
+        plt.savefig(img, format="png")
+        plt.close()
+        img.seek(0)
+        return send_file(img, mimetype="image/png")
+    except Exception as e:
+        return f"<p>Error generando gráfica: {e}</p>", 500
 
 @app.route("/exportar")
 def exportar():
-    df = load_data()
-    # crear archivo temporal (se sobreescribe cada vez con timestamp)
-    temp_dir = tempfile.gettempdir()
-    fname = f"fallas_export_{int(time.time())}.xlsx"
-    temp_file = os.path.join(temp_dir, fname)
     try:
+        df = load_data()
+        # crear archivo temporal (se sobreescribe cada vez con timestamp)
+        temp_dir = tempfile.gettempdir()
+        fname = f"fallas_export_{int(time.time())}.xlsx"
+        temp_file = os.path.join(temp_dir, fname)
+        if df.empty:
+            # devolver mensaje en HTML (cliente lo mostrará)
+            return "<p>No hay datos para exportar.</p>"
         with pd.ExcelWriter(temp_file, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="fallas")
     except Exception as e:
@@ -525,7 +568,7 @@ def preparar_envio():
             rows_html += "</tr>"
         rows_html += "</table><h3>Destinatarios:</h3>"
         for nombre,num in NUMEROS_WHATSAPP.items():
-            rows_html += f"<input type='checkbox' name='destinatarios' value='{num}'> {nombre} ({num})<br>"
+            rows_html += f"<input type='checkbox' name='destinatarios' value='{num}' checked> {nombre} ({num})<br>"
         rows_html += "<br>Manual (opcional): <input type='text' name='manual_num' placeholder='Ej: 528449998877'><br><br>"
         rows_html += "<button type='submit'>Enviar WhatsApp</button></form>"
     return f"<html><head><meta charset='utf-8'><title>Preparar Envío</title></head><body style='font-family:Arial;text-align:center'><h2>Selecciona fallas y destinatarios</h2>{rows_html}<br><a href='{url_for('index')}'>Volver</a></body></html>"
@@ -553,8 +596,8 @@ def enviar_whatsapp():
 
     mensaje = "📋 *Reporte de Fallas Seleccionadas*\n\n"
     for _, row in df_sel.iterrows():
-        start = row.get("startISO") or ""
-        end = row.get("endISO") or ""
+        start = row.get("startISO") or row.get("start","")
+        end = row.get("endISO") or row.get("end","")
         try:
             s = datetime.fromisoformat(start).strftime("%Y-%m-%d %H:%M") if start else ""
         except:

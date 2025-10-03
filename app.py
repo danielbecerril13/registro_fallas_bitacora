@@ -12,7 +12,7 @@ COLUMNS = ["id","nombre","numeroEmpleado","linea","machine","failure","startISO"
 
 # Números de WhatsApp predeterminados (nombre: número con código de país)
 NUMEROS_WHATSAPP = {
-    "Jose Vitel": "528443434019",
+    "Jose Vitela": "528443434019",
     "Daniel Becerril": "528443507879",
     "Eduardo Salinas": "528446060480",
     "Samuel Gaytan": "528445064299",
